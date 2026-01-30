@@ -1,9 +1,9 @@
 # AI Agent for PR/Commit Information Extraction
 
 An AI-powered agent that extracts structured information from pull requests and commits, including:
-- **Requestor name**: The person who created the PR or commit
+- **Repository Owner**: The owner of the repository
 - **Date**: When the PR/commit was created
-- **New version**: Version number if mentioned (e.g., 1.2.3)
+- **Version Change**: Version change information (e.g., "1.2.3 -> 2.0.0")
 - **Description**: Clear description of the changes
 
 ## Features
@@ -44,12 +44,12 @@ python main.py --source commit --sha abc123 --repo /path/to/repo
 
 #### Extract from a commit message directly
 ```bash
-python main.py --source commit --message "feat: add new feature v1.2.3" --author "John Doe" --date "2024-01-15T10:30:00"
+python main.py --source commit --message "feat: version bump 1.2.3 -> 2.0.0" --repo-owner "microsoft" --date "2024-01-15T10:30:00"
 ```
 
 #### Extract from a pull request
 ```bash
-python main.py --source pr --message "Add authentication" --body "Implements OAuth2 authentication" --author "Jane Smith" --date "2024-01-15T10:30:00"
+python main.py --source pr --message "Add authentication" --body "Implements OAuth2 authentication" --repo-owner "github" --date "2024-01-15T10:30:00"
 ```
 
 #### Extract from a GitHub pull request
@@ -64,12 +64,12 @@ python main.py --source github-commit --repo owner/repo-name --sha abc123def456
 
 #### Use rule-based extraction (no AI)
 ```bash
-python main.py --source commit --message "..." --author "..." --no-ai
+python main.py --source commit --message "..." --repo-owner "..." --no-ai
 ```
 
 #### Output as JSON
 ```bash
-python main.py --source commit --message "..." --author "..." --output json
+python main.py --source commit --message "..." --repo-owner "..." --output json
 ```
 
 ### Python API
@@ -83,13 +83,13 @@ agent = AIAgent()
 
 # Extract from commit
 result = agent.extract_from_commit(
-    commit_message="feat: add new feature v1.2.3",
-    author="John Doe",
+    commit_message="feat: version bump 1.2.3 -> 2.0.0",
+    repo_owner="microsoft",
     date=datetime.now(),
     use_ai=True
 )
 
-print(f"Version: {result.new_version}")
+print(f"Version Change: {result.version_change}")
 print(f"Description: {result.description}")
 ```
 
@@ -109,14 +109,14 @@ result = github.extract_from_pr_number(
 ```python
 from git_integration import GitIntegration
 
-git = GitIntegration(repo_path=".")
+git = GitIntegration(repo_path=".", repo_owner="microsoft")
 result = git.extract_from_commit_sha("abc123", use_ai=True)
 ```
 
 ## Project Structure
 
 ```
-ai/
+extractor/
 ├── main.py                 # CLI entry point
 ├── ai_agent.py             # Main AI agent class
 ├── extractors.py           # Rule-based extractors
@@ -132,18 +132,18 @@ ai/
 ## Output Format
 
 The extracted information is returned as an `ExtractedInfo` object with:
-- `requestor_name`: str
+- `repo_owner`: str
 - `date`: datetime
-- `new_version`: Optional[str]
+- `version_change`: Optional[str] (e.g., "1.2.3 -> 2.0.0")
 - `description`: str
 
 ## Examples
 
-### Example 1: Commit with version
+### Example 1: Commit with version change
 ```bash
 python main.py --source commit \
-  --message "Release v2.1.0: Added new authentication system" \
-  --author "Alice Developer" \
+  --message "Release: version bump 1.2.3 -> 2.0.0 - Added new authentication system" \
+  --repo-owner "microsoft" \
   --date "2024-01-15T14:30:00"
 ```
 
@@ -152,9 +152,9 @@ Output:
 ==================================================
 EXTRACTED INFORMATION
 ==================================================
-Requestor: Alice Developer
+Repository Owner: microsoft
 Date: 2024-01-15 14:30:00
-New Version: 2.1.0
+Version Change: 1.2.3 -> 2.0.0
 Description: Added new authentication system
 ==================================================
 ```
@@ -165,6 +165,16 @@ python main.py --source github-pr \
   --repo microsoft/vscode \
   --pr-number 12345
 ```
+
+## Version Change Detection
+
+The agent can detect version changes in various formats:
+- `1.2.3 -> 2.0.0`
+- `v1.2.3 -> v2.0.0`
+- `version 1.2.3 to 2.0.0`
+- `upgrade from 1.2.3 to 2.0.0`
+- `bump version 1.2.3 to 2.0.0`
+- Single version: `v2.0.0` (assumed to be the new version)
 
 ## Configuration
 

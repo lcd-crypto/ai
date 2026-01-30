@@ -41,10 +41,13 @@ class GitHubIntegration:
         repo = self.github.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
         
+        # Extract repo owner from repo_name
+        repo_owner = repo_name.split("/")[0]
+        
         return self.agent.extract_from_pr(
             title=pr.title,
             body=pr.body or "",
-            author=pr.user.login,
+            repo_owner=repo_owner,
             date=pr.created_at,
             use_ai=use_ai
         )
@@ -72,9 +75,12 @@ class GitHubIntegration:
         repo = self.github.get_repo(repo_name)
         commit = repo.get_commit(commit_sha)
         
+        # Extract repo owner from repo_name
+        repo_owner = repo_name.split("/")[0]
+        
         return self.agent.extract_from_commit(
             commit_message=commit.commit.message,
-            author=commit.commit.author.name,
+            repo_owner=repo_owner,
             date=commit.commit.author.date,
             use_ai=use_ai
         )

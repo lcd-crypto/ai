@@ -10,15 +10,37 @@ from ai_agent import AIAgent
 class GitIntegration:
     """Integration with local Git repository."""
     
-    def __init__(self, repo_path: str = "."):
+    def __init__(self, repo_path: str = ".", repo_owner: str = None):
         """
         Initialize Git repository.
         
         Args:
             repo_path: Path to the git repository
+            repo_owner: Repository owner name (if not provided, will try to extract from remote)
         """
         self.repo = Repo(repo_path)
         self.agent = AIAgent()
+        self.repo_owner = repo_owner or self._extract_repo_owner()
+    
+    def _extract_repo_owner(self) -> str:
+        """Try to extract repo owner from git remote."""
+        try:
+            remote = self.repo.remote()
+            url = remote.url
+            # Extract owner from common URL formats
+            if "github.com" in url:
+                parts = url.replace(".git", "").split("/")
+                if len(parts) >= 2:
+                    return parts[-2]
+            elif "git@" in url:
+                # SSH format: git@github.com:owner/repo.git
+                parts = url.split(":")
+                if len(parts) >= 2:
+                    repo_part = parts[1].replace(".git", "")
+                    return repo_part.split("/")[0]
+        except:
+            pass
+        return "unknown"
     
     def extract_from_commit_sha(
         self,
@@ -39,7 +61,7 @@ class GitIntegration:
         
         return self.agent.extract_from_commit(
             commit_message=commit.message,
-            author=commit.author.name,
+            repo_owner=self.repo_owner,
             date=datetime.fromtimestamp(commit.committed_date),
             use_ai=use_ai
         )

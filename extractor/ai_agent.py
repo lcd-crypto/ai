@@ -22,7 +22,7 @@ class AIAgent:
     def extract_from_commit(
         self,
         commit_message: str,
-        author: str,
+        repo_owner: str,
         date: datetime,
         use_ai: bool = True
     ) -> ExtractedInfo:
@@ -31,7 +31,7 @@ class AIAgent:
         
         Args:
             commit_message: The commit message
-            author: The commit author
+            repo_owner: The repository owner name
             date: The commit date
             use_ai: Whether to use AI extraction (default: True)
             
@@ -41,14 +41,14 @@ class AIAgent:
         if use_ai:
             return self._extract_with_ai(
                 text=commit_message,
-                author=author,
+                repo_owner=repo_owner,
                 date=date,
                 source_type="commit"
             )
         else:
             return CommitExtractor.extract_from_commit_message(
                 commit_message=commit_message,
-                author=author,
+                repo_owner=repo_owner,
                 date=date
             )
     
@@ -56,7 +56,7 @@ class AIAgent:
         self,
         title: str,
         body: str,
-        author: str,
+        repo_owner: str,
         date: datetime,
         use_ai: bool = True
     ) -> ExtractedInfo:
@@ -66,7 +66,7 @@ class AIAgent:
         Args:
             title: The PR title
             body: The PR body/description
-            author: The PR author
+            repo_owner: The repository owner name
             date: The PR creation date
             use_ai: Whether to use AI extraction (default: True)
             
@@ -77,7 +77,7 @@ class AIAgent:
             full_text = f"Title: {title}\n\nDescription: {body}"
             return self._extract_with_ai(
                 text=full_text,
-                author=author,
+                repo_owner=repo_owner,
                 date=date,
                 source_type="pull request"
             )
@@ -85,14 +85,14 @@ class AIAgent:
             return PullRequestExtractor.extract_from_pr(
                 title=title,
                 body=body,
-                author=author,
+                repo_owner=repo_owner,
                 date=date
             )
     
     def _extract_with_ai(
         self,
         text: str,
-        author: str,
+        repo_owner: str,
         date: datetime,
         source_type: str
     ) -> ExtractedInfo:
@@ -101,7 +101,7 @@ class AIAgent:
         
         Args:
             text: The text to analyze
-            author: The author/requestor name
+            repo_owner: The repository owner name
             date: The date
             source_type: Type of source (commit or pull request)
             
@@ -114,19 +114,19 @@ Text to analyze:
 {text}
 
 Please extract:
-1. New version (if mentioned, format as X.Y.Z or X.Y, e.g., "1.2.3" or "2.0")
+1. Version change (if mentioned, format as "X.Y.Z -> A.B.C" for version changes, or just "X.Y.Z" for a single version)
 2. Description of change (a clear, concise description of what changed)
 
-Author: {author}
+Repository Owner: {repo_owner}
 Date: {date.isoformat()}
 
 Respond in JSON format:
 {{
-    "new_version": "version number or null",
+    "version_change": "version change string (e.g., '1.2.3 -> 2.0.0') or null",
     "description": "description of the change"
 }}
 
-If version is not found, use null. Make the description clear and informative."""
+If version change is not found, use null. Make the description clear and informative."""
 
         try:
             response = self.client.chat.completions.create(
@@ -143,19 +143,19 @@ If version is not found, use null. Make the description clear and informative.""
             result = json.loads(response.choices[0].message.content)
             
             return ExtractedInfo(
-                requestor_name=author,
+                repo_owner=repo_owner,
                 date=date,
-                new_version=result.get("new_version") if result.get("new_version") != "null" else None,
+                version_change=result.get("version_change") if result.get("version_change") != "null" else None,
                 description=result.get("description", text)
             )
         except Exception as e:
             # Fallback to rule-based extraction if AI fails
             print(f"AI extraction failed: {e}. Falling back to rule-based extraction.")
             if source_type == "commit":
-                return CommitExtractor.extract_from_commit_message(text, author, date)
+                return CommitExtractor.extract_from_commit_message(text, repo_owner, date)
             else:
                 # Split title and body for PR
                 lines = text.split("\n", 1)
                 title = lines[0].replace("Title: ", "")
                 body = lines[1].replace("Description: ", "") if len(lines) > 1 else ""
-                return PullRequestExtractor.extract_from_pr(title, body, author, date)
+                return PullRequestExtractor.extract_from_pr(title, body, repo_owner, date)

@@ -36,9 +36,9 @@ def main():
     )
     
     parser.add_argument(
-        "--author",
+        "--repo-owner",
         type=str,
-        help="Author/requestor name"
+        help="Repository owner name"
     )
     
     parser.add_argument(
@@ -86,31 +86,31 @@ def main():
         if args.source == "commit":
             # Local commit extraction
             if args.sha and args.repo:
-                git = GitIntegration(args.repo)
+                git = GitIntegration(args.repo, repo_owner=args.repo_owner)
                 result = git.extract_from_commit_sha(args.sha, use_ai=use_ai)
-            elif args.message and args.author:
+            elif args.message and args.repo_owner:
                 date = datetime.fromisoformat(args.date) if args.date else datetime.now()
                 agent = AIAgent()
                 result = agent.extract_from_commit(
                     commit_message=args.message,
-                    author=args.author,
+                    repo_owner=args.repo_owner,
                     date=date,
                     use_ai=use_ai
                 )
             else:
-                parser.error("For commit: provide either (--sha and --repo) or (--message and --author)")
+                parser.error("For commit: provide either (--sha and --repo) or (--message and --repo-owner)")
         
         elif args.source == "pr":
             # Local PR extraction
-            if not args.message or not args.author:
-                parser.error("For pr: --message and --author are required")
+            if not args.message or not args.repo_owner:
+                parser.error("For pr: --message and --repo-owner are required")
             
             date = datetime.fromisoformat(args.date) if args.date else datetime.now()
             agent = AIAgent()
             result = agent.extract_from_pr(
                 title=args.message,
                 body=args.body or "",
-                author=args.author,
+                repo_owner=args.repo_owner,
                 date=date,
                 use_ai=use_ai
             )
@@ -146,9 +146,9 @@ def main():
             print("\n" + "="*50)
             print("EXTRACTED INFORMATION")
             print("="*50)
-            print(f"Requestor: {result.requestor_name}")
+            print(f"Repository Owner: {result.repo_owner}")
             print(f"Date: {result.date}")
-            print(f"New Version: {result.new_version or 'Not specified'}")
+            print(f"Version Change: {result.version_change or 'Not specified'}")
             print(f"Description: {result.description}")
             print("="*50 + "\n")
     

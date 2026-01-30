@@ -8,9 +8,9 @@ from typing import Optional
 
 class ExtractedInfo(BaseModel):
     """Model for extracted information from PR or commit."""
-    requestor_name: str
+    repo_owner: str
     date: datetime
-    new_version: Optional[str] = None
+    version_change: Optional[str] = None
     description: str
     
     class Config:
