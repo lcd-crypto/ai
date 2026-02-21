@@ -8,7 +8,8 @@ This guide provides step-by-step instructions for setting up and running the ext
 2. [Initial Setup](#initial-setup)
 3. [Setting Up the Two Agents (Monitoring Relationship)](#setting-up-the-two-agents-monitoring-relationship)
 4. [Running the Agents](#running-the-agents)
-5. [Troubleshooting](#troubleshooting)
+5. [Batch Processing](#batch-processing)
+6. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -331,6 +332,74 @@ Here's how the monitoring relationship works:
 
 ---
 
+## Batch Processing
+
+The observer agent supports validating multiple extractions in a single call using `observe_batch()`. This is useful when processing many commits or PRs at once.
+
+### Basic Batch Usage
+
+```python
+from extractor_observer.observer_agent import ObserverAgent
+from extractor_observer.models import ExtractedData
+from datetime import datetime
+
+observer = ObserverAgent(generate_reports=True, max_retries=2)
+
+# Prepare a list of extracted data
+extractions = [
+    ExtractedData(
+        repo_owner="owner-a",
+        date=datetime(2024, 1, 15),
+        version_change="1.0.0 -> 1.1.0",
+        description="Added new feature"
+    ),
+    ExtractedData(
+        repo_owner="owner-b",
+        date=datetime(2024, 1, 16),
+        version_change=None,
+        description="Fixed bug in auth module"
+    ),
+]
+
+# Validate all at once
+results = observer.observe_batch(extractions)
+
+for i, result in enumerate(results):
+    if result.is_valid:
+        print(f"✅ Extraction {i+1} passed")
+    else:
+        print(f"❌ Extraction {i+1} failed: {result.errors}")
+```
+
+### Batch with Source Contexts
+
+You can optionally pass a context dictionary for each extraction (one per item), which will be included in any failure reports:
+
+```python
+contexts = [
+    {"type": "commit", "sha": "abc123"},
+    {"type": "pull_request", "pr_number": 42},
+]
+
+results = observer.observe_batch(extractions, source_contexts=contexts)
+```
+
+### Controlling Strict Mode in Batch
+
+By default, `observe_batch()` inherits the `strict_mode` setting from the observer instance. You can override this per batch call using the `strict_mode_override` parameter:
+
+```python
+# Suppress exceptions for this batch even if observer has strict_mode=True
+results = observer.observe_batch(extractions, strict_mode_override=False)
+
+# Enforce strict mode for this batch even if observer has strict_mode=False
+results = observer.observe_batch(extractions, strict_mode_override=True)
+```
+
+> **Note**: `observe_batch()` does not support automatic retry. If you need retry behaviour for individual items, call `observe_with_retry()` per extraction instead.
+
+---
+
 ## Troubleshooting
 
 ### Issue: "OPENAI_API_KEY is required"
@@ -350,6 +419,9 @@ Here's how the monitoring relationship works:
 1. Check that `GENERATE_REPORTS=true` in observer's `.env`
 2. Verify the `reports/` directory exists or can be created
 3. Ensure validation actually failed (reports only generated on failure)
+4. **Note on report timing**: The behaviour differs depending on how you call the observer:
+   - **`observe_extraction()` called directly**: A report is generated immediately when validation fails, on every call.
+   - **`observe_with_retry()` used**: Reports are intentionally suppressed during retry attempts and only generated once all retries are exhausted. This is by design to avoid noise from transient failures.
 
 ### Issue: Retry not working
 
