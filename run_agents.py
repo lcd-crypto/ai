@@ -14,7 +14,7 @@ observer_path = os.path.join(base_dir, 'extractor observer')
 sys.path.insert(0, extractor_path)
 sys.path.insert(0, observer_path)
 
-from extractor.ai_agent import AIAgent
+from extractor.agentic_ai_agent import AgenticAIAgent as AIAgent
 from extractor.git_integration import GitIntegration
 from extractor.github_integration import GitHubIntegration
 from extractor.models import ExtractedInfo
