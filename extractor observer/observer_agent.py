@@ -21,47 +21,29 @@ class ObserverAgent:
         generate_reports: bool = True,
         max_retries: int = 2
     ):
-        """
-        Initialize the observer agent.
-
-        Args:
-            strict_mode: If True, raises exceptions on validation failures.
-                         If None, uses Config.STRICT_MODE.
-            use_ai: If True, uses AI for additional validation checks.
-            generate_reports: If True, generates reports when validation fails.
-            max_retries: Maximum number of retry attempts for extractor (default: 2).
-        """
         self.strict_mode = strict_mode if strict_mode is not None else Config.STRICT_MODE
         self.use_ai = use_ai and Config.ENABLE_AI_VALIDATION
         self.generate_reports = generate_reports
-        # FIX 7: Removed redundant None guard — type hint guarantees int
         self.max_retries = max_retries
         self.validator = DataValidator()
         self.validation_history: List[Dict[str, Any]] = []
         self.report_generator = ReportGenerator() if generate_reports else None
         self.retry_handler = RetryHandler(max_retries=self.max_retries)
 
-        if self.use_ai:
-            if not Config.OPENAI_API_KEY:
-                raise ValueError("OPENAI_API_KEY is required for AI validation. Set it in .env file.")
-            self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
-            self.model = Config.OPENAI_MODEL
-            self.temperature = Config.OPENAI_TEMPERATURE
+        # Always initialise an OpenAI client — used for diagnosis even when
+        # use_ai (AI validation) is disabled.
+        if not Config.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required. Set it in .env file.")
+        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        self.model = Config.OPENAI_MODEL
+        self.temperature = Config.OPENAI_TEMPERATURE
 
     # ------------------------------------------------------------------
-    # FIX 1: Extracted shared validation logic into one private method
+    # Core validation pipeline
     # ------------------------------------------------------------------
+
     def _run_validation(self, extracted_data: ExtractedData) -> ValidationResult:
-        """
-        Core validation pipeline shared by all observe methods.
-        Runs completeness check, full validation, and optional AI validation.
-
-        Args:
-            extracted_data: The extracted data to validate.
-
-        Returns:
-            Combined ValidationResult.
-        """
+        """Shared validation pipeline used by all observe methods."""
         completeness_result = self.validator.validate_completeness(extracted_data)
         validation_result = self.validator.validate_extracted_data(extracted_data)
 
@@ -69,8 +51,6 @@ class ObserverAgent:
         all_warnings = completeness_result.warnings + validation_result.warnings
         is_valid = completeness_result.is_valid and validation_result.is_valid
 
-        # FIX 5: AI validation now runs regardless of rule-based result,
-        # so it can contribute additional error context on failures too.
         if self.use_ai:
             ai_result = self._ai_validate(extracted_data)
             if ai_result:
@@ -92,31 +72,19 @@ class ObserverAgent:
         _generate_report: bool = True
     ) -> ValidationResult:
         """
-        Observe and validate extracted data from the extractor agent.
-
-        Main check: No data extracted can be empty or invalid.
+        Observe and validate extracted data.
 
         Args:
             extracted_data: The extracted data to validate.
             source_context: Optional context about the source.
-            _generate_report: Internal flag — set to False during retries to
-                              suppress premature report generation.
+            _generate_report: Set False during retries to suppress premature reports.
 
         Returns:
             ValidationResult with validation status.
-
-        Raises:
-            ValueError: If strict_mode is True and validation fails.
         """
-        # FIX 1: Use shared validation pipeline
         combined_result = self._run_validation(extracted_data)
-
-        # Record every call in history (FIX 3: retries now also record via this path)
         self._record_validation(extracted_data, combined_result, source_context)
 
-        # FIX 2: Report generation is now controlled by the _generate_report flag,
-        # not a fragile retry_count injected into source_context by the caller.
-        # Reports are suppressed during retries and only emitted when truly final.
         if not combined_result.is_valid and self.generate_reports and self.report_generator and _generate_report:
             report_path = self.report_generator.generate_report(
                 extracted_data=extracted_data,
@@ -128,22 +96,175 @@ class ObserverAgent:
                 print(f"Report generated: {report_path}")
 
         if self.strict_mode and not combined_result.is_valid:
-            error_msg = f"Validation failed: {', '.join(combined_result.errors)}"
-            raise ValueError(error_msg)
+            raise ValueError(f"Validation failed: {', '.join(combined_result.errors)}")
 
         return combined_result
 
-    def _ai_validate(self, extracted_data: ExtractedData) -> Optional[Dict[str, Any]]:
+    # ------------------------------------------------------------------
+    # Diagnose-and-repair retry loop  ← KEY CHANGE
+    # ------------------------------------------------------------------
+
+    def observe_with_retry(
+        self,
+        extractor_func: Callable,
+        extractor_args: Dict[str, Any],
+        source_context: Optional[Dict[str, Any]] = None
+    ) -> Tuple[ExtractedData, ValidationResult, int]:
         """
-        Use AI to perform additional validation checks.
+        Run extraction → validate → diagnose failure → retry with repair hint.
+
+        On each failed attempt the observer asks the LLM to diagnose WHY the
+        extraction failed and produces a repair_hint.  That hint is passed back
+        into extractor_func on the next attempt so the agentic extractor can
+        change its tool-call strategy rather than blindly repeating itself.
 
         Args:
-            extracted_data: The extracted data to validate.
+            extractor_func: Callable that accepts repair_hint=None and returns
+                            an ExtractedInfo-compatible object.
+            extractor_args: Base keyword arguments for extractor_func.
+            source_context: Optional metadata about the source (for reports).
 
         Returns:
-            Dictionary with AI validation results or None.
+            Tuple of (extracted_data, validation_result, attempts_made).
         """
+        repair_hint = None
+        last_extracted = None
+        last_result = None
+
+        for attempt in range(self.max_retries + 1):
+            # Build call args — inject repair_hint on retry attempts
+            call_args = {**extractor_args}
+            if repair_hint:
+                call_args["repair_hint"] = repair_hint
+                print(f"\n[Observer] Retry {attempt} — diagnosis passed to extractor:\n"
+                      f"  → {repair_hint[:120]}{'...' if len(repair_hint) > 120 else ''}\n")
+
+            # Run extraction
+            raw_result = extractor_func(**call_args)
+
+            # Convert ExtractedInfo → ExtractedData for the observer
+            extracted_data = self._to_extracted_data(raw_result)
+            last_extracted = extracted_data
+
+            # Validate — suppress report during mid-loop attempts
+            is_final_attempt = attempt == self.max_retries
+            validation_result = self.observe_extraction(
+                extracted_data,
+                source_context=source_context,
+                _generate_report=False  # always suppress here; we emit below
+            )
+            last_result = validation_result
+
+            if validation_result.is_valid:
+                print(f"[Observer] ✅ Validation passed on attempt {attempt + 1}")
+                return extracted_data, validation_result, attempt
+
+            print(f"[Observer] ❌ Attempt {attempt + 1} failed — "
+                  f"errors: {', '.join(validation_result.errors)}")
+
+            if not is_final_attempt:
+                # Ask LLM to diagnose before next attempt
+                repair_hint = self._diagnose_failure(
+                    bad_result=raw_result,
+                    validation_errors=validation_result.errors,
+                    source_context=source_context or {}
+                )
+
+        # All retries exhausted — emit one final report
+        if self.generate_reports and self.report_generator and last_extracted and last_result:
+            final_context = (source_context or {}).copy()
+            final_context.update({
+                "retry_count": self.max_retries,
+                "max_retries": self.max_retries,
+                "retry_exhausted": True
+            })
+            report_path = self.report_generator.generate_report(
+                extracted_data=last_extracted,
+                validation_result=last_result,
+                source_context=final_context,
+                format="text"
+            )
+            if report_path:
+                print(f"\n⚠️  All {self.max_retries} retry attempts exhausted. "
+                      f"Report generated: {report_path}")
+
+        return last_extracted, last_result, self.max_retries
+
+    def _diagnose_failure(
+        self,
+        bad_result,
+        validation_errors: List[str],
+        source_context: Dict[str, Any]
+    ) -> str:
+        """
+        Ask the LLM to diagnose why extraction failed and suggest a repair.
+
+        Returns a short, concrete instruction for the extractor to use on
+        its next attempt — e.g. which tool to call, which file to look at.
+        """
+        import json
+
+        prompt = f"""An extraction pipeline produced invalid output. Diagnose the root cause
+and return a SHORT, concrete instruction (2-3 sentences) telling the extractor
+what to do differently on its next attempt.
+
+Failed extraction:
+- repo_owner: {getattr(bad_result, 'repo_owner', None)!r}
+- version_change: {getattr(bad_result, 'version_change', None)!r}
+- description: {getattr(bad_result, 'description', None)!r}
+
+Validation errors: {validation_errors}
+Source context: {json.dumps(source_context, default=str)}
+
+Be specific: name alternative sources (diff, changelog, PR body) or patterns
+to look for. Do NOT repeat the error messages verbatim."""
+
         try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a debugging agent for LLM extraction pipelines. "
+                            "Be terse and actionable. Return plain text, no JSON."
+                        )
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=200,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[Observer] Diagnosis call failed: {e}")
+            return "Retry with a different extraction strategy — check the diff and changelog."
+
+    def _to_extracted_data(self, raw_result) -> ExtractedData:
+        """Convert ExtractedInfo (extractor model) → ExtractedData (observer model)."""
+        return ExtractedData(
+            repo_owner=raw_result.repo_owner,
+            date=raw_result.date,
+            version_change=raw_result.version_change,
+            description=raw_result.description,
+        )
+
+    def _validate_for_retry(self, extracted_data: ExtractedData) -> ValidationResult:
+        """Kept for backward compatibility with RetryHandler (no longer used internally)."""
+        return self.observe_extraction(
+            extracted_data,
+            source_context=None,
+            _generate_report=False
+        )
+
+    # ------------------------------------------------------------------
+    # AI validation
+    # ------------------------------------------------------------------
+
+    def _ai_validate(self, extracted_data: ExtractedData) -> Optional[Dict[str, Any]]:
+        """Use AI for additional validation checks."""
+        try:
+            import json
             prompt = f"""Validate the following extracted data from a software repository:
 
 Repository Owner: {extracted_data.repo_owner}
@@ -173,12 +294,14 @@ Respond in JSON format:
                 temperature=self.temperature,
                 response_format={"type": "json_object"}
             )
-
-            import json
             return json.loads(response.choices[0].message.content)
         except Exception as e:
             print(f"AI validation failed: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # History and reporting
+    # ------------------------------------------------------------------
 
     def _record_validation(
         self,
@@ -186,7 +309,6 @@ Respond in JSON format:
         result: ValidationResult,
         source_context: Optional[Dict[str, Any]]
     ):
-        """Record validation result in history."""
         self.validation_history.append({
             "timestamp": datetime.now(),
             "repo_owner": extracted_data.repo_owner,
@@ -199,20 +321,9 @@ Respond in JSON format:
         })
 
     def get_validation_summary(self) -> Dict[str, Any]:
-        """
-        Get summary of all validations performed.
-
-        Returns:
-            Dictionary with validation statistics.
-        """
         if not self.validation_history:
-            return {
-                "total_validations": 0,
-                "passed": 0,
-                "failed": 0,
-                "total_errors": 0,
-                "total_warnings": 0
-            }
+            return {"total_validations": 0, "passed": 0, "failed": 0,
+                    "total_errors": 0, "total_warnings": 0}
 
         total = len(self.validation_history)
         passed = sum(1 for v in self.validation_history if v["is_valid"])
@@ -232,110 +343,21 @@ Respond in JSON format:
         }
 
     def get_failed_validations(self) -> List[Dict[str, Any]]:
-        """
-        Get list of all failed validations.
-
-        Returns:
-            List of validation records that failed.
-        """
         return [v for v in self.validation_history if not v["is_valid"]]
 
-    def observe_with_retry(
-        self,
-        extractor_func: Callable,
-        extractor_args: Dict[str, Any],
-        source_context: Optional[Dict[str, Any]] = None
-    ) -> Tuple[ExtractedData, ValidationResult, int]:
-        """
-        Observe extraction with automatic retry if validation fails.
-
-        Retries call observe_extraction() with report generation suppressed.
-        A final report is only generated after all retries are exhausted.
-
-        Args:
-            extractor_func: The extractor function to call.
-            extractor_args: Arguments to pass to the extractor function.
-            source_context: Optional context about the source.
-
-        Returns:
-            Tuple of (extracted_data, validation_result, retry_count).
-        """
-        # FIX 3 & 6: Removed dead `validate_data` closure.
-        # observe_extraction() is now used directly via _validate_for_retry,
-        # which suppresses reports during retry attempts and records history properly.
-
-        extracted_data, validation_result, retry_count = self.retry_handler.execute_with_retry(
-            extractor_func=extractor_func,
-            extractor_args=extractor_args,
-            validation_func=self._validate_for_retry,
-            context=source_context
-        )
-
-        # Generate final report only after all retries exhausted
-        if not validation_result.is_valid and self.generate_reports and self.report_generator:
-            retry_context = source_context.copy() if source_context else {}
-            retry_context['retry_count'] = retry_count
-            retry_context['max_retries'] = self.max_retries
-            retry_context['retry_exhausted'] = True
-
-            report_path = self.report_generator.generate_report(
-                extracted_data=extracted_data,
-                validation_result=validation_result,
-                source_context=retry_context,
-                format="text"
-            )
-            if report_path:
-                print(f"\n⚠️  All retry attempts exhausted. Report generated: {report_path}")
-
-        return extracted_data, validation_result, retry_count
-
-    def _validate_for_retry(self, extracted_data: ExtractedData) -> ValidationResult:
-        """
-        Validation method used during retry cycles.
-
-        FIX 1 & 3: Now delegates to observe_extraction() with report generation
-        suppressed, ensuring history is recorded on every attempt without
-        triggering premature reports.
-
-        Args:
-            extracted_data: The extracted data to validate.
-
-        Returns:
-            ValidationResult.
-        """
-        return self.observe_extraction(
-            extracted_data,
-            source_context=None,
-            _generate_report=False  # Reports suppressed until retries exhausted
-        )
-
     def generate_summary_report(self, format: str = "text") -> Optional[str]:
-        """
-        Generate a summary report of all failed validations.
-
-        Args:
-            format: Report format ('text', 'json', 'html').
-
-        Returns:
-            Path to the generated report file, or None if no failures.
-        """
         if not self.generate_reports or not self.report_generator:
             return None
-
         failed_validations = self.get_failed_validations()
         if not failed_validations:
             return None
-
-        summary_stats = self.get_validation_summary()
-
         return self.report_generator.generate_summary_report(
             failed_validations=failed_validations,
-            summary_stats=summary_stats,
+            summary_stats=self.get_validation_summary(),
             format=format
         )
 
     def clear_history(self):
-        """Clear validation history."""
         self.validation_history.clear()
 
     def observe_batch(
@@ -344,30 +366,10 @@ Respond in JSON format:
         source_contexts: Optional[List[Dict[str, Any]]] = None,
         strict_mode_override: Optional[bool] = None
     ) -> List[ValidationResult]:
-        """
-        Observe and validate multiple extractions in batch.
-
-        FIX 4: Added strict_mode_override parameter so callers can explicitly
-        control strict mode behaviour in batch context rather than having it
-        silently ignored.
-
-        Args:
-            extracted_data_list: List of extracted data to validate.
-            source_contexts: Optional list of source contexts (one per extraction).
-            strict_mode_override: If provided, overrides instance strict_mode for
-                                  this batch. Pass False to suppress exceptions in
-                                  batch; pass True to enforce them.
-
-        Returns:
-            List of ValidationResult objects.
-        """
         if source_contexts is None:
             source_contexts = [None] * len(extracted_data_list)
 
-        # Determine effective strict mode for this batch
         effective_strict = strict_mode_override if strict_mode_override is not None else self.strict_mode
-
-        # Temporarily override strict_mode if needed
         original_strict = self.strict_mode
         self.strict_mode = effective_strict
 
@@ -378,18 +380,10 @@ Respond in JSON format:
                     result = self.observe_extraction(extracted_data, context)
                     results.append(result)
                 except ValueError as e:
-                    # Only reached if strict_mode is True
-                    failed_result = ValidationResult(
-                        is_valid=False,
-                        errors=[str(e)],
-                        warnings=[]
-                    )
-                    results.append(failed_result)
+                    results.append(ValidationResult(is_valid=False, errors=[str(e)], warnings=[]))
                     if effective_strict:
-                        # Re-raise immediately if strict mode is explicitly enforced in batch
                         raise
         finally:
-            # Always restore original strict_mode
             self.strict_mode = original_strict
 
         return results
